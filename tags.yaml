@@ -1,0 +1,46 @@
+plant:   { host: 127.0.0.1, port: 5502 }
+proxy:   { host: 127.0.0.1, port: 5020 }
+physics: { tick_ms: 250, approach: 0.08, ambient: 5, gain: 1.0, flow_factor: 0.95 }
+
+tags:
+  - kind: holding
+    addr: 0
+    name: PMP101_SPEED_CMD
+    unit: "%"
+    init: 55
+    safe: [0, 80]
+    impact: "Pump driven outside its safe operating envelope"
+  - kind: holding
+    addr: 1
+    name: FT101_FLOW
+    unit: "m3/h"
+    init: 52
+    readback: true
+  - kind: holding
+    addr: 2
+    name: PT101_PRESSURE
+    unit: "PSI"
+    init: 60
+    readback: true
+  - kind: holding
+    addr: 3
+    name: HP_TRIP_SETPOINT
+    unit: "PSI"
+    init: 95
+    safe: [90, 100]
+    impact: "High-pressure protection setpoint moved away from its design value"
+  - kind: coil
+    addr: 0
+    name: PMP101_RUN
+    init: 1
+  - kind: coil
+    addr: 1
+    name: HP_TRIP_ENABLE
+    init: 1
+    protective: true
+    must_stay: 1
+    impact: "Loss of high-pressure protection — over-pressurisation hazard"
+  - kind: coil
+    addr: 2
+    name: XV101_VALVE_OPEN
+    init: 1
