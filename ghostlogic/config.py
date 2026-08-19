@@ -74,6 +74,8 @@ def _parse_tag(raw: dict) -> Tag:
     must_stay = raw.get("must_stay")
     if protective and must_stay is None:
         raise ValueError(f"tag {raw['name']}: protective tags need must_stay")
+    if must_stay is not None:
+        must_stay = int(must_stay)
 
     return Tag(
         kind=kind,
