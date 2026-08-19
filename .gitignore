@@ -9,3 +9,5 @@ venv/
 # runtime output written by scenario runs
 out/
 .superpowers/
+reference/
+ghostlogic-starter.zip
