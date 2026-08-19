@@ -17,6 +17,17 @@ tags:
   - { kind: coil, addr: 0, name: D, init: 1 }
 """
 
+GAPPY_COIL = """
+plant:   { host: 127.0.0.1, port: 5502 }
+proxy:   { host: 127.0.0.1, port: 5020 }
+physics: { tick_ms: 250, approach: 0.08, ambient: 5, gain: 1.0, flow_factor: 0.95 }
+tags:
+  - { kind: holding, addr: 0, name: A, init: 1 }
+  - { kind: coil, addr: 0, name: D, init: 1 }
+  - { kind: coil, addr: 1, name: E, init: 1 }
+  - { kind: coil, addr: 3, name: F, init: 1 }
+"""
+
 
 @pytest.fixture(scope="module")
 def running_plant():
@@ -59,9 +70,17 @@ def test_a_write_lands_in_the_datastore(running_plant):
         client.close()
 
 
-def test_a_gap_in_the_address_space_is_rejected(tmp_path):
-    path = tmp_path / "gappy.yaml"
+def test_a_gap_in_the_holding_address_space_is_rejected(tmp_path):
+    path = tmp_path / "gappy_holding.yaml"
     path.write_text(GAPPY_HOLDING)
     cfg = load_config(path)
     with pytest.raises(ValueError, match="holding"):
+        build_context(cfg)
+
+
+def test_a_gap_in_the_coil_address_space_is_rejected(tmp_path):
+    path = tmp_path / "gappy_coil.yaml"
+    path.write_text(GAPPY_COIL)
+    cfg = load_config(path)
+    with pytest.raises(ValueError, match="coil"):
         build_context(cfg)

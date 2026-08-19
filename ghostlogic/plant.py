@@ -103,15 +103,15 @@ class Plant:
         """
         p = self.cfg.physics
 
-        speed = self._get(FC_HOLDING, self._a_speed)
+        speed_cmd = self._get(FC_HOLDING, self._a_speed)
         setpoint = self._get(FC_HOLDING, self._a_setpoint)
         running = self._get(FC_COIL, self._a_run)
         trip_armed = self._get(FC_COIL, self._a_trip_en)
         valve_open = self._get(FC_COIL, self._a_valve)
 
         if running and valve_open:
-            target = p.ambient + speed * p.gain
-            flow = speed * p.flow_factor
+            target = p.ambient + speed_cmd * p.gain
+            flow = speed_cmd * p.flow_factor
         else:
             target = float(p.ambient)
             flow = 0.0
@@ -122,6 +122,7 @@ class Plant:
             self._set(FC_COIL, self._a_run, 0)
             self._set(FC_HOLDING, self._a_speed, 0)
             self.tripped = True
+            flow = 0.0  # the pump just stopped; do not publish the pre-trip flow
 
         self._set(FC_HOLDING, self._a_pressure, round(self.pressure))
         self._set(FC_HOLDING, self._a_flow, round(flow))

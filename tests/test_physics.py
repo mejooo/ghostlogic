@@ -42,6 +42,7 @@ def test_overspeed_with_the_trip_armed_stops_the_pump():
     assert plant.tripped is True
     assert plant._get(FC_COIL, plant._a_run) == 0
     assert plant._get(FC_HOLDING, plant._a_speed) == 0
+    assert plant._get(FC_HOLDING, plant._a_flow) == 0
 
 
 def test_overspeed_with_the_trip_disabled_runs_away():
