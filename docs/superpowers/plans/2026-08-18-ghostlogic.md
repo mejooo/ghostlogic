@@ -987,6 +987,7 @@ Add `import time` at the top, then these methods to `Plant`:
             self._set(FC_COIL, self._a_run, 0)
             self._set(FC_HOLDING, self._a_speed, 0)
             self.tripped = True
+            flow = 0.0  # the pump just stopped; do not publish the pre-trip flow
 
         self._set(FC_HOLDING, self._a_pressure, round(self.pressure))
         self._set(FC_HOLDING, self._a_flow, round(flow))
