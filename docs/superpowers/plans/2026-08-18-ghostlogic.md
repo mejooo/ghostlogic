@@ -85,9 +85,14 @@ PyYAML==6.0.2
 -r requirements.txt
 pytest==8.3.4
 ruff==0.9.6
-bandit==1.8.2
+bandit==1.9.4
 pip-audit==2.9.0
 ```
+
+`bandit` must be 1.9.4 or newer. Version 1.8.2 crashes on Python 3.14 (it uses
+`ast.Str`, removed in 3.12+) and — the dangerous part — **skips every file while
+still exiting 0**. A security scan that silently scans nothing and reports success
+is worse than no scan at all.
 
 - [ ] **Step 4: Install and see whether pymodbus survives Python 3.14**
 
@@ -293,7 +298,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, "build/**"]
   pull_request:
 
 permissions:
@@ -343,7 +348,7 @@ name: CodeQL
 
 on:
   push:
-    branches: [main]
+    branches: [main, "build/**"]
   pull_request:
   schedule:
     - cron: "0 3 * * 1"
