@@ -286,7 +286,7 @@ git commit -m "test: Ollama reachability smoke test, skipped when absent"
 
 - [ ] **Step 1: Write `.github/workflows/ci.yml`**
 
-Set `python-version` to whichever version Task 1 landed on.
+Python 3.14 is pinned here because Task 1 proved pymodbus 3.6.9 works on it. Pin the minor version `"3.14"`, never a patch like `"3.14.6"` — the local venv already drifted a patch release when Homebrew upgraded underneath it.
 
 ```yaml
 name: CI
@@ -306,7 +306,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.14"
           cache: pip
       - run: pip install -r requirements-dev.txt
       - name: Lint
@@ -322,7 +322,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.14"
       - run: pip install -r requirements-dev.txt
       - name: Dependency CVEs
         run: pip-audit -r requirements.txt
@@ -3244,7 +3244,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.14"
           cache: pip
       - run: pip install -r requirements.txt
       - name: Replay the recorded run into a static snapshot
