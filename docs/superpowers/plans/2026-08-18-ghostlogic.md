@@ -124,7 +124,12 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+pythonpath = ["."]
 ```
+
+`pythonpath = ["."]` puts the repo root on `sys.path` for the test run, so
+`import ghostlogic` works under a bare `pytest` invocation (which is how CI calls
+it) without an editable install and without any `sys.path` mutation in a conftest.
 
 - [ ] **Step 6: Write the failing test**
 
@@ -626,6 +631,8 @@ def _parse_tag(raw: dict) -> Tag:
     must_stay = raw.get("must_stay")
     if protective and must_stay is None:
         raise ValueError(f"tag {raw['name']}: protective tags need must_stay")
+    if must_stay is not None:
+        must_stay = int(must_stay)
 
     return Tag(
         kind=kind,
