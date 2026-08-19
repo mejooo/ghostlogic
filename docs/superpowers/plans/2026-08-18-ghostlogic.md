@@ -21,6 +21,10 @@
 - **Time is scalable.** Every sleep is divided by a `speed` factor so the 60-second demo runs in 3 seconds under test.
 - **Physics constants** (from spec): `tick_ms 250`, `approach 0.08`, `ambient 5`, `gain 1.0`, `flow_factor 0.95`.
 - **Ports:** plant `127.0.0.1:5502`, proxy `127.0.0.1:5020`.
+- **The capture contract carries connection identity:** `sink(conn, direction, raw, ts)`.
+  The proxy taps multiple TCP connections (HMI and attacker are separate clients),
+  so the dissector buffers per `(conn, direction)` and matches pending requests per
+  `(conn, txn)`. Without this, two clients' byte streams interleave into one buffer.
 - **Every task ends with a commit.** Commit messages use `feat:`, `test:`, `ci:`, `docs:`, `fix:`.
 
 ## File Structure
@@ -1019,7 +1023,7 @@ git commit -m "feat: pressure physics and in-plant high-pressure trip"
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: constants `C_TO_P = "c->p"`, `P_TO_C = "p->c"`; `WriteEvent(kind, addr, value, func, txn, raw_hex)`; `Dissector()` with `.feed(direction, raw) -> list[WriteEvent | ValueUpdate]`, `.frames: int`, `.malformed: int`. `ValueUpdate` arrives in Task 8.
+- Produces: constants `C_TO_P = "c->p"`, `P_TO_C = "p->c"`; `WriteEvent(kind, addr, value, func, txn, raw_hex)`; `Dissector()` with `.feed(conn, direction, raw) -> list[WriteEvent | ValueUpdate]` (conn identifies the TCP connection), `.frames: int`, `.malformed: int`. `ValueUpdate` arrives in Task 8.
 
 - [ ] **Step 1: Create the shared frame builders**
 
@@ -1034,6 +1038,8 @@ git commit -m "feat: pressure physics and in-plant high-pressure trip"
 """Modbus frame builders shared by the dissector tests."""
 
 import struct
+
+CONN = "c1"  # a single client connection; see the two-connection test
 
 
 def mbap(pdu: bytes, txn: int = 1, unit: int = 1) -> bytes:
@@ -1059,12 +1065,12 @@ def write_register(addr: int, value: int, txn: int = 1) -> bytes:
 import struct
 
 from ghostlogic.dissect import C_TO_P, P_TO_C, Dissector, WriteEvent
-from tests.helpers import mbap, write_coil, write_register
+from tests.helpers import CONN, mbap, write_coil, write_register
 
 
 def test_write_single_coil_decodes():
     d = Dissector()
-    events = d.feed(C_TO_P, write_coil(1, False))
+    events = d.feed(CONN, C_TO_P, write_coil(1, False))
 
     assert events == [
         WriteEvent(kind="coil", addr=1, value=0, func=0x05, txn=1,
@@ -1075,7 +1081,7 @@ def test_write_single_coil_decodes():
 
 def test_write_single_register_decodes():
     d = Dissector()
-    events = d.feed(C_TO_P, write_register(0, 110, txn=7))
+    events = d.feed(CONN, C_TO_P, write_register(0, 110, txn=7))
 
     assert len(events) == 1
     assert events[0].kind == "holding"
@@ -1086,7 +1092,7 @@ def test_write_single_register_decodes():
 
 def test_two_frames_in_one_chunk_both_decode():
     d = Dissector()
-    events = d.feed(C_TO_P, write_register(0, 70) + write_coil(1, False))
+    events = d.feed(CONN, C_TO_P, write_register(0, 70) + write_coil(1, False))
 
     assert len(events) == 2
     assert events[0].value == 70
@@ -1098,8 +1104,8 @@ def test_a_frame_split_across_two_chunks_is_not_lost():
     d = Dissector()
     frame = write_register(0, 110)
 
-    assert d.feed(C_TO_P, frame[:5]) == []
-    events = d.feed(C_TO_P, frame[5:])
+    assert d.feed(CONN, C_TO_P, frame[:5]) == []
+    events = d.feed(CONN, C_TO_P, frame[5:])
 
     assert len(events) == 1
     assert events[0].value == 110
@@ -1111,16 +1117,35 @@ def test_a_frame_split_into_many_chunks_is_not_lost():
     frame = write_coil(1, False)
     collected = []
     for i in range(len(frame)):
-        collected += d.feed(C_TO_P, frame[i : i + 1])
+        collected += d.feed(CONN, C_TO_P, frame[i : i + 1])
 
     assert len(collected) == 1
     assert collected[0].value == 0
 
 
+def test_two_connections_do_not_corrupt_each_other():
+    """The HMI and the attacker are separate TCP connections through one tap.
+
+    Without per-connection buffering, this interleaving produces garbage and a
+    false malformed count — a race that would make the demo flaky.
+    """
+    d = Dissector()
+    a, b = write_register(0, 70, txn=1), write_coil(1, False, txn=1)
+
+    assert d.feed("hmi", C_TO_P, a[:5]) == []
+    assert d.feed("attacker", C_TO_P, b[:5]) == []
+    from_a = d.feed("hmi", C_TO_P, a[5:])
+    from_b = d.feed("attacker", C_TO_P, b[5:])
+
+    assert [e.value for e in from_a] == [70]
+    assert [e.value for e in from_b] == [0]
+    assert d.malformed == 0
+
+
 def test_write_multiple_registers_decodes_each_value():
     d = Dissector()
     pdu = struct.pack(">BHHB", 0x10, 0, 2, 4) + struct.pack(">HH", 70, 52)
-    events = d.feed(C_TO_P, mbap(pdu))
+    events = d.feed(CONN, C_TO_P, mbap(pdu))
 
     assert [(e.addr, e.value) for e in events] == [(0, 70), (1, 52)]
 
@@ -1128,7 +1153,7 @@ def test_write_multiple_registers_decodes_each_value():
 def test_write_multiple_coils_decodes_each_bit():
     d = Dissector()
     pdu = struct.pack(">BHHB", 0x0F, 0, 3, 1) + bytes([0b00000101])
-    events = d.feed(C_TO_P, mbap(pdu))
+    events = d.feed(CONN, C_TO_P, mbap(pdu))
 
     assert [(e.addr, e.value) for e in events] == [(0, 1), (1, 0), (2, 1)]
 
@@ -1138,7 +1163,7 @@ def test_a_lying_byte_count_is_counted_not_crashed():
     d = Dissector()
     pdu = struct.pack(">BHHB", 0x10, 0, 8, 4) + b"\x00\x46"
 
-    events = d.feed(C_TO_P, mbap(pdu))
+    events = d.feed(CONN, C_TO_P, mbap(pdu))
 
     assert events == []
     assert d.malformed == 1
@@ -1146,7 +1171,7 @@ def test_a_lying_byte_count_is_counted_not_crashed():
 
 def test_a_truncated_pdu_is_counted_not_crashed():
     d = Dissector()
-    events = d.feed(C_TO_P, mbap(struct.pack(">BH", 0x06, 0)))
+    events = d.feed(CONN, C_TO_P, mbap(struct.pack(">BH", 0x06, 0)))
 
     assert events == []
     assert d.malformed == 1
@@ -1154,7 +1179,7 @@ def test_a_truncated_pdu_is_counted_not_crashed():
 
 def test_a_non_modbus_protocol_id_is_rejected():
     d = Dissector()
-    events = d.feed(C_TO_P, struct.pack(">HHHB", 1, 99, 6, 1) + b"\x06\x00\x00\x00\x46")
+    events = d.feed(CONN, C_TO_P, struct.pack(">HHHB", 1, 99, 6, 1) + b"\x06\x00\x00\x00\x46")
 
     assert events == []
     assert d.malformed == 1
@@ -1162,13 +1187,13 @@ def test_a_non_modbus_protocol_id_is_rejected():
 
 def test_exception_responses_are_ignored():
     d = Dissector()
-    assert d.feed(P_TO_C, mbap(struct.pack(">BB", 0x86, 0x02))) == []
+    assert d.feed(CONN, P_TO_C, mbap(struct.pack(">BB", 0x86, 0x02))) == []
 
 
 def test_writes_from_the_plant_side_are_ignored():
     """Only client-to-plant traffic carries commands."""
     d = Dissector()
-    assert d.feed(P_TO_C, write_coil(1, False)) == []
+    assert d.feed(CONN, P_TO_C, write_coil(1, False)) == []
 ```
 
 - [ ] **Step 3: Run it to see it fail**
@@ -1212,16 +1237,25 @@ class WriteEvent:
 
 
 class Dissector:
+    """Buffers per (connection, direction).
+
+    The proxy taps several TCP connections at once — in the demo the HMI and
+    the attacker are two separate clients. Buffering per direction alone would
+    interleave their byte streams: a partial frame from one client followed by
+    bytes from the other yields a corrupted frame and a false malformed count.
+    Transaction IDs collide the same way, since every client starts at 1.
+    """
+
     def __init__(self) -> None:
-        self._buf: dict[str, bytes] = {C_TO_P: b"", P_TO_C: b""}
-        self._pending: dict[int, tuple[int, int, int]] = {}
+        self._buf: dict[tuple[str, str], bytes] = {}
+        self._pending: dict[tuple[str, int], tuple[int, int, int]] = {}
         self.frames = 0
         self.malformed = 0
 
-    def feed(self, direction: str, raw: bytes) -> list:
+    def feed(self, conn: str, direction: str, raw: bytes) -> list:
         """Decode whatever complete frames this chunk completes."""
         events: list = []
-        buf = self._buf.get(direction, b"") + raw
+        buf = self._buf.get((conn, direction), b"") + raw
 
         while len(buf) >= MBAP_SIZE:
             txn, proto, length, _unit = struct.unpack(">HHHB", buf[:MBAP_SIZE])
@@ -1238,14 +1272,14 @@ class Dissector:
             frame, buf = buf[:total], buf[total:]
             self.frames += 1
             try:
-                events.extend(self._handle(direction, txn, frame))
+                events.extend(self._handle(conn, direction, txn, frame))
             except (struct.error, IndexError, ValueError):
                 self.malformed += 1
 
-        self._buf[direction] = buf
+        self._buf[(conn, direction)] = buf
         return events
 
-    def _handle(self, direction: str, txn: int, frame: bytes) -> list:
+    def _handle(self, conn: str, direction: str, txn: int, frame: bytes) -> list:
         pdu = frame[MBAP_SIZE:]
         if not pdu:
             raise ValueError("empty pdu")
@@ -1259,7 +1293,7 @@ class Dissector:
                 return self._writes(func, data, txn, frame)
             if func in READ_FUNCS:
                 start, qty = struct.unpack(">HH", data[:4])
-                self._pending[txn] = (func, start, qty)
+                self._pending[(conn, txn)] = (func, start, qty)
             return []
 
         return []  # replies are handled in Task 8
@@ -1331,7 +1365,7 @@ This is what lets you say GhostLogic never originates a packet to the plant. The
 import struct
 
 from ghostlogic.dissect import C_TO_P, P_TO_C, Dissector, ValueUpdate
-from tests.helpers import mbap
+from tests.helpers import CONN, mbap
 
 
 def read_holding_request(start: int, qty: int, txn: int = 3) -> bytes:
@@ -1356,8 +1390,8 @@ def read_coils_reply(bits: list[int], txn: int = 4) -> bytes:
 
 def test_a_holding_reply_becomes_live_values():
     d = Dissector()
-    d.feed(C_TO_P, read_holding_request(0, 4))
-    events = d.feed(P_TO_C, read_holding_reply([70, 66, 75, 95]))
+    d.feed(CONN, C_TO_P, read_holding_request(0, 4))
+    events = d.feed(CONN, P_TO_C, read_holding_reply([70, 66, 75, 95]))
 
     assert events == [
         ValueUpdate("holding", 0, 70),
@@ -1369,8 +1403,8 @@ def test_a_holding_reply_becomes_live_values():
 
 def test_a_coil_reply_becomes_live_values():
     d = Dissector()
-    d.feed(C_TO_P, read_coils_request(0, 3))
-    events = d.feed(P_TO_C, read_coils_reply([1, 0, 1]))
+    d.feed(CONN, C_TO_P, read_coils_request(0, 3))
+    events = d.feed(CONN, P_TO_C, read_coils_reply([1, 0, 1]))
 
     assert events == [
         ValueUpdate("coil", 0, 1),
@@ -1382,16 +1416,16 @@ def test_a_coil_reply_becomes_live_values():
 def test_a_reply_without_its_request_is_ignored():
     """We cannot know which addresses it refers to, so we must not guess."""
     d = Dissector()
-    assert d.feed(P_TO_C, read_holding_reply([70, 66, 75, 95])) == []
+    assert d.feed(CONN, P_TO_C, read_holding_reply([70, 66, 75, 95])) == []
 
 
 def test_replies_are_matched_by_transaction_id():
     d = Dissector()
-    d.feed(C_TO_P, read_holding_request(0, 1, txn=11))
-    d.feed(C_TO_P, read_holding_request(3, 1, txn=12))
+    d.feed(CONN, C_TO_P, read_holding_request(0, 1, txn=11))
+    d.feed(CONN, C_TO_P, read_holding_request(3, 1, txn=12))
 
-    second = d.feed(P_TO_C, read_holding_reply([95], txn=12))
-    first = d.feed(P_TO_C, read_holding_reply([70], txn=11))
+    second = d.feed(CONN, P_TO_C, read_holding_reply([95], txn=12))
+    first = d.feed(CONN, P_TO_C, read_holding_reply([70], txn=11))
 
     assert second == [ValueUpdate("holding", 3, 95)]
     assert first == [ValueUpdate("holding", 0, 70)]
@@ -1399,8 +1433,8 @@ def test_replies_are_matched_by_transaction_id():
 
 def test_a_reply_that_contradicts_its_request_is_counted_malformed():
     d = Dissector()
-    d.feed(C_TO_P, read_holding_request(0, 4))
-    events = d.feed(P_TO_C, read_holding_reply([70]))
+    d.feed(CONN, C_TO_P, read_holding_request(0, 4))
+    events = d.feed(CONN, P_TO_C, read_holding_reply([70]))
 
     assert events == []
     assert d.malformed == 1
@@ -1408,11 +1442,11 @@ def test_a_reply_that_contradicts_its_request_is_counted_malformed():
 
 def test_a_split_reply_is_not_lost():
     d = Dissector()
-    d.feed(C_TO_P, read_holding_request(0, 4))
+    d.feed(CONN, C_TO_P, read_holding_request(0, 4))
     reply = read_holding_reply([70, 66, 75, 95])
 
-    assert d.feed(P_TO_C, reply[:6]) == []
-    assert len(d.feed(P_TO_C, reply[6:])) == 4
+    assert d.feed(CONN, P_TO_C, reply[:6]) == []
+    assert len(d.feed(CONN, P_TO_C, reply[6:])) == 4
 ```
 
 - [ ] **Step 2: Run it to see it fail**
@@ -1435,7 +1469,7 @@ class ValueUpdate:
 Replace the final line of `_handle` (`return []  # replies are handled in Task 8`) with:
 
 ```python
-        pending = self._pending.pop(txn, None)
+        pending = self._pending.pop((conn, txn), None)
         if pending is None or pending[0] != func:
             return []
         return self._reply_values(func, data, pending)
@@ -1488,7 +1522,7 @@ git commit -m "feat: decode read replies into live tag values, matched by transa
 
 **Interfaces:**
 - Consumes: `Config` from Task 4.
-- Produces: type alias `Sink = Callable[[str, bytes, float], None]`; `Recorder(path, inner)` callable as a sink with `.close()`; `proxy.serve(cfg, sink, stop, ready=None)` blocking until `stop` is set.
+- Produces: type alias `Sink = Callable[[str, str, bytes, float], None]` — `sink(conn, direction, raw, ts)`, where conn identifies the TCP connection (the proxy uses `host:port` of the client); `Recorder(path, inner)` callable as a sink with `.close()`; `proxy.serve(cfg, sink, stop, ready=None)` blocking until `stop` is set.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1537,7 +1571,7 @@ def test_proxy_forwards_both_ways_and_taps_every_frame(tmp_path):
     threading.Thread(target=_echo_server, args=(15502, stop), daemon=True).start()
     threading.Thread(
         target=serve,
-        args=(cfg, lambda d, raw, ts: seen.append((d, raw)), stop, ready),
+        args=(cfg, lambda c, d, raw, ts: seen.append((d, raw)), stop, ready),
         daemon=True,
     ).start()
     assert ready.wait(timeout=5)
@@ -1557,15 +1591,15 @@ def test_proxy_forwards_both_ways_and_taps_every_frame(tmp_path):
 def test_recorder_writes_every_frame_as_replayable_jsonl(tmp_path):
     path = tmp_path / "run.jsonl"
     inner_calls = []
-    rec = Recorder(path, lambda d, raw, ts: inner_calls.append((d, raw)))
+    rec = Recorder(path, lambda c, d, raw, ts: inner_calls.append((d, raw)))
 
-    rec("c->p", b"\x01\x02", 100.0)
-    rec("p->c", b"\x03", 100.5)
+    rec("c1", "c->p", b"\x01\x02", 100.0)
+    rec("c1", "p->c", b"\x03", 100.5)
     rec.close()
 
     lines = [json.loads(line) for line in path.read_text().splitlines()]
-    assert lines[0] == {"t": 0.0, "direction": "c->p", "hex": "0102"}
-    assert lines[1] == {"t": 0.5, "direction": "p->c", "hex": "03"}
+    assert lines[0] == {"t": 0.0, "conn": "c1", "direction": "c->p", "hex": "0102"}
+    assert lines[1] == {"t": 0.5, "conn": "c1", "direction": "p->c", "hex": "03"}
     assert inner_calls == [("c->p", b"\x01\x02"), ("p->c", b"\x03")]
 ```
 
@@ -1596,10 +1630,11 @@ import json
 from collections.abc import Callable
 from pathlib import Path
 
-Sink = Callable[[str, bytes, float], None]
+# Imported, not redefined: dissect.py owns the wire vocabulary and imports
+# nothing itself, so there is no cycle and no second definition to drift.
+from ghostlogic.dissect import C_TO_P, P_TO_C  # noqa: F401  (re-exported)
 
-C_TO_P = "c->p"
-P_TO_C = "p->c"
+Sink = Callable[[str, str, bytes, float], None]
 
 
 class Recorder:
@@ -1610,17 +1645,18 @@ class Recorder:
         self._inner = inner
         self._start: float | None = None
 
-    def __call__(self, direction: str, raw: bytes, ts: float) -> None:
+    def __call__(self, conn: str, direction: str, raw: bytes, ts: float) -> None:
         if self._start is None:
             self._start = ts
         record = {
             "t": round(ts - self._start, 4),
+            "conn": conn,
             "direction": direction,
             "hex": raw.hex(),
         }
         self._fh.write(json.dumps(record) + "\n")
         self._fh.flush()
-        self._inner(direction, raw, ts)
+        self._inner(conn, direction, raw, ts)
 
     def close(self) -> None:
         self._fh.close()
@@ -1646,14 +1682,14 @@ from ghostlogic.config import Config
 from ghostlogic.sources import C_TO_P, P_TO_C, Sink
 
 
-def _pump(src: socket.socket, dst: socket.socket, direction: str, sink: Sink,
-          stop: threading.Event) -> None:
+def _pump(conn: str, src: socket.socket, dst: socket.socket, direction: str,
+          sink: Sink, stop: threading.Event) -> None:
     try:
         while not stop.is_set():
             data = src.recv(4096)
             if not data:
                 break
-            sink(direction, data, time.monotonic())
+            sink(conn, direction, data, time.monotonic())
             dst.sendall(data)
     except OSError:
         pass
@@ -1665,8 +1701,8 @@ def _pump(src: socket.socket, dst: socket.socket, direction: str, sink: Sink,
                 pass
 
 
-def _handle(client: socket.socket, plant_addr: tuple[str, int], sink: Sink,
-            stop: threading.Event) -> None:
+def _handle(conn: str, client: socket.socket, plant_addr: tuple[str, int],
+            sink: Sink, stop: threading.Event) -> None:
     plant = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         plant.connect(plant_addr)
@@ -1675,8 +1711,10 @@ def _handle(client: socket.socket, plant_addr: tuple[str, int], sink: Sink,
         return
 
     threads = [
-        threading.Thread(target=_pump, args=(client, plant, C_TO_P, sink, stop), daemon=True),
-        threading.Thread(target=_pump, args=(plant, client, P_TO_C, sink, stop), daemon=True),
+        threading.Thread(target=_pump, args=(conn, client, plant, C_TO_P, sink, stop),
+                         daemon=True),
+        threading.Thread(target=_pump, args=(conn, plant, client, P_TO_C, sink, stop),
+                         daemon=True),
     ]
     for t in threads:
         t.start()
@@ -1701,14 +1739,15 @@ def serve(cfg: Config, sink: Sink, stop: threading.Event,
 
     while not stop.is_set():
         try:
-            client, _ = srv.accept()
+            client, peer = srv.accept()
         except socket.timeout:
             continue
         except OSError:
             break
         threading.Thread(
             target=_handle,
-            args=(client, (cfg.plant_host, cfg.plant_port), sink, stop),
+            args=(f"{peer[0]}:{peer[1]}", client, (cfg.plant_host, cfg.plant_port),
+                  sink, stop),
             daemon=True,
         ).start()
 
@@ -2194,8 +2233,8 @@ class Pipeline:
         self._writes = 0
         self._seq = 0
 
-    def __call__(self, direction: str, raw: bytes, ts: float) -> None:
-        for event in self.dissector.feed(direction, raw):
+    def __call__(self, conn: str, direction: str, raw: bytes, ts: float) -> None:
+        for event in self.dissector.feed(conn, direction, raw):
             if isinstance(event, ValueUpdate):
                 tag = self.cfg.tags.get((event.kind, event.addr))
                 if tag is not None:
@@ -2474,14 +2513,15 @@ from ghostlogic.sources.replay import play
 
 def test_a_recorded_run_plays_back_in_order(tmp_path):
     path = tmp_path / "run.jsonl"
-    rec = Recorder(path, lambda d, raw, ts: None)
-    rec("c->p", b"\x01", 10.0)
-    rec("p->c", b"\x02\x03", 10.2)
-    rec("c->p", b"\x04", 10.4)
+    rec = Recorder(path, lambda c, d, raw, ts: None)
+    rec("c1", "c->p", b"\x01", 10.0)
+    rec("c1", "p->c", b"\x02\x03", 10.2)
+    rec("c1", "c->p", b"\x04", 10.4)
     rec.close()
 
     seen = []
-    frames = play(path, lambda d, raw, ts: seen.append((d, raw)), threading.Event(), speed=100.0)
+    frames = play(path, lambda c, d, raw, ts: seen.append((d, raw)), threading.Event(),
+                  speed=100.0)
 
     assert frames == 3
     assert seen == [("c->p", b"\x01"), ("p->c", b"\x02\x03"), ("c->p", b"\x04")]
@@ -2489,15 +2529,15 @@ def test_a_recorded_run_plays_back_in_order(tmp_path):
 
 def test_replay_stops_when_asked(tmp_path):
     path = tmp_path / "run.jsonl"
-    rec = Recorder(path, lambda d, raw, ts: None)
+    rec = Recorder(path, lambda c, d, raw, ts: None)
     for i in range(20):
-        rec("c->p", bytes([i]), float(i))
+        rec("c1", "c->p", bytes([i]), float(i))
     rec.close()
 
     stop = threading.Event()
     seen = []
 
-    def sink(direction, raw, ts):
+    def sink(conn, direction, raw, ts):
         seen.append(raw)
         if len(seen) == 3:
             stop.set()
@@ -2541,7 +2581,8 @@ def play(path: str | Path, sink: Sink, stop: threading.Event, speed: float = 1.0
         wait = record["t"] / speed - (time.monotonic() - started)
         if wait > 0:
             time.sleep(wait)
-        sink(record["direction"], bytes.fromhex(record["hex"]), time.monotonic())
+        sink(record["conn"], record["direction"], bytes.fromhex(record["hex"]),
+             time.monotonic())
         played += 1
 
     return played
